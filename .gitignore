@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# YOLO / Ultralytics
+training_runs/
+comparisons/
+datasets/
+*.pt
+*.onnx
+
+# Local Config
+config.json
+debug_log.txt
