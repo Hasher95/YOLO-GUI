@@ -173,6 +173,21 @@ class YoloTrainerApp(ctk.CTk):
             base_dir = os.path.dirname(os.path.abspath(__file__))
         return os.path.join(base_dir, "config.json")
 
+    def browse_model_file(self):
+        """Browse for a custom model .pt file."""
+        file_path = filedialog.askopenfilename(
+            title="Select YOLO Model",
+            filetypes=[("YOLO Model", "*.pt"), ("All Files", "*.*")]
+        )
+        if file_path:
+            # Set the combobox value to the selected path
+            self.model_var.set(file_path)
+            # Add to values list if not present so it shows up
+            current_vals = list(self.model_combobox.cget("values"))
+            if file_path not in current_vals:
+                current_vals.append(file_path)
+                self.model_combobox.configure(values=current_vals)
+
     def save_settings(self):
         """Saves current GUI values to config.json."""
         try:
@@ -338,12 +353,21 @@ class YoloTrainerApp(ctk.CTk):
         self.model_label.grid(row=1, column=0, padx=20, pady=(10, 0), sticky="w")
         
         self.model_var = ctk.StringVar(value="yolov8n.pt")
-        self.model_combobox = ctk.CTkComboBox(self.sidebar_frame,
+        self.model_frame = ctk.CTkFrame(self.sidebar_frame, fg_color="transparent")
+        self.model_frame.grid(row=2, column=0, padx=20, pady=(0, 10))
+        
+        self.model_combobox = ctk.CTkComboBox(self.model_frame,
                                             values=["yolov8n.pt", "yolov8s.pt", "yolov8m.pt", 
                                                     "yolov8l.pt", "yolov8x.pt", 
-                                                    "yolo11n.pt", "yolo11s.pt", "yolo11m.pt"],
-                                            variable=self.model_var)
-        self.model_combobox.grid(row=2, column=0, padx=20, pady=(0, 10))
+                                                    "yolo11n.pt", "yolo11s.pt", "yolo11m.pt",
+                                                    "yolo11l.pt", "yolo11x.pt"],
+                                            variable=self.model_var,
+                                            width=140)
+        self.model_combobox.grid(row=0, column=0, padx=(0, 5))
+        
+        self.model_browse_btn = ctk.CTkButton(self.model_frame, text="...", width=30, 
+                                             command=self.browse_model_file)
+        self.model_browse_btn.grid(row=0, column=1, padx=(5, 0))
 
         # Epochs
         self.epochs_label = ctk.CTkLabel(self.sidebar_frame, text="Epochs:", anchor="w")
@@ -630,6 +654,7 @@ class YoloTrainerApp(ctk.CTk):
         
         self.classes_entry = ctk.CTkEntry(self.config_frame, placeholder_text="e.g. cat, dog, person")
         self.classes_entry.grid(row=3, column=0, columnspan=2, padx=10, pady=(0,10), sticky="ew")
+        ToolTip(self.classes_entry, "List your classes in order (index 0, 1, 2...).\nMake sure they match the classes in your .txt files.")
 
         # Step 3: Action
         self.process_btn = ctk.CTkButton(self.tab_prep, text="GENERATE DATASET & YAML", 
@@ -911,17 +936,23 @@ class YoloTrainerApp(ctk.CTk):
             files = [f for f in os.listdir(source_dir) if f.lower().endswith(supported_ext)]
             
             pairs = []
+            bg_count = 0
             for img_file in files:
                 basename = os.path.splitext(img_file)[0]
                 txt_file = basename + '.txt'
-                if os.path.exists(os.path.join(source_dir, txt_file)):
+                txt_path = os.path.join(source_dir, txt_file)
+                if os.path.exists(txt_path):
                     pairs.append((img_file, txt_file))
+                else:
+                    # Background image (Negative sample)
+                    pairs.append((img_file, None))
+                    bg_count += 1
             
             if not pairs:
-                self.log_prep("ERROR: No valid image+txt pairs found.")
+                self.log_prep("ERROR: No images found in source folder.")
                 return
 
-            self.log_prep(f"Found {len(pairs)} image-label pairs.")
+            self.log_prep(f"Found {len(pairs)} images ({bg_count} are background/negative samples).")
             
             # Create Structure
             target_root = os.path.join(source_dir, "dataset_split")
@@ -944,18 +975,30 @@ class YoloTrainerApp(ctk.CTk):
 
             # Copy Files
             def copy_files(file_set, type_name):
+                processed = 0
                 for img, txt in file_set:
                     # Copy Image
                     shutil.copy2(os.path.join(source_dir, img), 
                                  os.path.join(target_root, f'images/{type_name}', img))
-                    # Copy Label
-                    shutil.copy2(os.path.join(source_dir, txt), 
-                                 os.path.join(target_root, f'labels/{type_name}', txt))
+                    
+                    # Copy or Create Label
+                    target_txt = os.path.splitext(img)[0] + ".txt"
+                    target_txt_path = os.path.join(target_root, f'labels/{type_name}', target_txt)
+                    
+                    if txt:
+                        shutil.copy2(os.path.join(source_dir, txt), target_txt_path)
+                    else:
+                        # Create empty file for background image
+                        open(target_txt_path, 'a').close()
+                        
+                    processed += 1
+                return processed
             
             self.log_prep("Copying training files...")
-            copy_files(train_set, 'train')
+            tr_count = copy_files(train_set, 'train')
             self.log_prep("Copying validation files...")
-            copy_files(val_set, 'val')
+            val_count = copy_files(val_set, 'val')
+            self.log_prep(f"Done: {tr_count} train / {val_count} val images copied.")
 
             # Generate YAML
             yaml_path = os.path.join(target_root, "data.yaml")
@@ -1054,14 +1097,108 @@ class YoloTrainerApp(ctk.CTk):
             sys.stderr = self.redirector
             print("[INFO] Starting Training Thread...") # Debug check
 
-            model = YOLO(model_name)
-            self.fix_ultralytics_logging() # Re-hook after YOLO init resets it
+            # ---------------------------------------------------------
+            # DETERMINE OUTPUT DIRECTORY
+            # ---------------------------------------------------------
+            if getattr(sys, 'frozen', False):
+                base_path = os.path.dirname(sys.executable)
+            else:
+                base_path = os.path.dirname(os.path.abspath(__file__))
+            
+            # Protection: If in 'dist\YoloTrainer', go two levels up to project root
+            if "dist" in base_path.lower():
+                parent = os.path.dirname(os.path.dirname(base_path))
+                if os.path.exists(parent):
+                    base_path = parent
+
+            project_path = os.path.normpath(os.path.join(base_path, "training_runs"))
+            train_name = "train"
+            abs_model_path = os.path.normpath(os.path.abspath(model_name))
 
             # ---------------------------------------------------------
-            # STOP & DIR CAPTURE MECHANISM (CALLBACKS)
+            # SMART RESUME: Surgical Patch BEFORE loading model
             # ---------------------------------------------------------
+            if resume_flag:
+                try:
+                    weights_dir = os.path.dirname(abs_model_path)
+                    train_dir = os.path.dirname(weights_dir)
+                    train_name = os.path.basename(train_dir)
+                    project_path = os.path.normpath(os.path.dirname(train_dir))
+                    norm_data_path = os.path.normpath(os.path.abspath(data_yaml_path))
+                    
+                    print(f"[SmartResume] Bootstrapping from: {abs_model_path}")
+                    
+                    # 1. Detect TRUE progress from results.csv
+                    actual_epochs_done = 0
+                    results_csv = os.path.join(train_dir, "results.csv")
+                    if os.path.exists(results_csv):
+                        try:
+                            with open(results_csv, 'r') as f:
+                                # Count lines minus header
+                                lines = [l for l in f.readlines() if l.strip()]
+                                if len(lines) > 1:
+                                    actual_epochs_done = len(lines) - 1
+                            print(f"[SmartResume] Detected {actual_epochs_done} epochs completed in results.csv")
+                        except:
+                            pass
+
+                    # 2. Patch args.yaml
+                    args_yaml = os.path.join(train_dir, "args.yaml")
+                    if os.path.exists(args_yaml):
+                        with open(args_yaml, 'r', encoding='utf-8', errors='ignore') as f:
+                            lines = f.readlines()
+                        new_lines = []
+                        keys_to_update = {
+                            "epochs:": f"epochs: {epochs}\n",
+                            "project:": f"project: \"{project_path}\"\n",
+                            "name:": f"name: \"{train_name}\"\n",
+                            "save_dir:": f"save_dir: \"{train_dir}\"\n",
+                            "data:": f"data: \"{norm_data_path}\"\n"
+                        }
+                        for line in lines:
+                            found_key = False
+                            for key in keys_to_update:
+                                if line.strip().startswith(key):
+                                    new_lines.append(keys_to_update[key])
+                                    found_key = True
+                                    break
+                            if not found_key:
+                                new_lines.append(line)
+                        with open(args_yaml, 'w', encoding='utf-8') as f:
+                            f.writelines(new_lines)
+
+                    # 3. Patch .pt Metadata (Double-down on everything)
+                    import torch
+                    ckpt = torch.load(abs_model_path, map_location='cpu', weights_only=False)
+                    
+                    # Fix the progress counter! If ckpt['epoch'] >= epochs, YOLO stops.
+                    # We force it back to what results.csv says.
+                    old_ckpt_epoch = ckpt.get('epoch', 0)
+                    ckpt['epoch'] = actual_epochs_done - 1 if actual_epochs_done > 0 else 0
+                    
+                    updated_keys = []
+                    for k in ['train_args', 'args']:
+                        if k in ckpt and isinstance(ckpt[k], dict):
+                            ckpt[k]['epochs'] = epochs
+                            ckpt[k]['project'] = project_path
+                            ckpt[k]['name'] = train_name
+                            ckpt[k]['save_dir'] = train_dir
+                            ckpt[k]['data'] = norm_data_path
+                            updated_keys.append(k)
+                    
+                    torch.save(ckpt, abs_model_path)
+                    print(f"[SmartResume] Metadata Sync: Counter {old_ckpt_epoch}->{ckpt['epoch']}, Target={epochs}")
+                    print(f"[SmartResume] Patched keys: {', '.join(updated_keys)}")
+                except Exception as e:
+                    print(f"[SmartResume] Surgical patching failed: {e}")
+
+            # ---------------------------------------------------------
+            # INITIALIZE & START TRAINING
+            # ---------------------------------------------------------
+            model = YOLO(abs_model_path if resume_flag else model_name)
+            self.fix_ultralytics_logging() 
+
             def on_train_start(trainer):
-                # Capture the actual directory being used (train, train2, etc.)
                 self.current_train_dir = str(trainer.save_dir)
                 print(f"[LiveView] Active directory detected: {self.current_train_dir}")
 
@@ -1072,39 +1209,29 @@ class YoloTrainerApp(ctk.CTk):
             model.add_callback("on_train_start", on_train_start)
             model.add_callback("on_train_batch_start", on_train_batch_start)
 
-            # ---------------------------------------------------------
-            # DETERMINE OUTPUT DIRECTORY
-            # ---------------------------------------------------------
-            if getattr(sys, 'frozen', False):
-                base_path = os.path.dirname(sys.executable)
+            print(f"Final targeting: project={project_path}, name={train_name}")
+            self.current_project_path = project_path 
+            
+            if resume_flag:
+                # Force epochs in the train call even for resume
+                results = model.train(resume=True, epochs=epochs, data=data_yaml_path)
             else:
-                base_path = os.path.dirname(os.path.abspath(__file__))
-            
-            project_path = os.path.join(base_path, "training_runs")
-            
-            print(f"Training results will be saved to: {project_path}")
-            self.current_project_path = project_path # Expose for graph updater
-            
-            # Temporary fallback, will be overwritten by on_train_start callback
-            self.current_train_dir = os.path.join(project_path, "train")
-
-            results = model.train(
-                data=data_yaml_path,
-                epochs=epochs,
-                imgsz=imgsz,
-                batch=batch_size,
-                device=device_str,
-                workers=8,
-                project=project_path,
-                name="train",
-                exist_ok=True, # Force use of 'train' folder to make tracking easier
-                # Advanced
-                resume=resume_flag,
-                optimizer=optim_choice,
-                mosaic=1.0 if use_mosaic else 0.0,
-                lr0=lr0,
-                momentum=momentum
-            )
+                self.current_train_dir = os.path.join(project_path, train_name) 
+                results = model.train(
+                    data=data_yaml_path,
+                    epochs=epochs,
+                    imgsz=imgsz,
+                    batch=batch_size,
+                    device=device_str,
+                    workers=8,
+                    project=project_path,
+                    name=train_name,
+                    exist_ok=True, 
+                    optimizer=optim_choice,
+                    mosaic=1.0 if use_mosaic else 0.0,
+                    lr0=lr0,
+                    momentum=momentum
+                )
             
             # On completion
             print(f"\n[INFO] Training Completed Successfully!\nModels saved in: {project_path}\n")

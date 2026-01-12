@@ -47,3 +47,12 @@ This script will automatically:
 ## License
 
 This project is available under the MIT License.
+
+## Changelog
+
+### v1.1.0 - Optimization & Stability Update
+*   **Critical Fix**: Resolved a `NameError` that prevented new training sessions from starting due to undefined hyperparameter variables (`use_mixup`, `lrf`, etc.).
+*   **Smart Resume V2**: Implemented "Deep Patching" for resuming training. Now aggressively patches `args.yaml` and internal checkpoint metadata to ensure training resumes correctly even if parameters changed.
+*   **Robustness**: Added logic to detect and handle "ghost" processes that could lock file access or corrupt result CSVs.
+*   **Performance**: Tuned default hyperparameters for larger models (YOLOv11l/x), including `AdamW` optimizer and adjusted learning rates.
+*   **UI Improvements**: Better handling of training stop requests and process cleanup.
